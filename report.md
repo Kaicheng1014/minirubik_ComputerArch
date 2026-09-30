@@ -1,3 +1,5 @@
+**Base Commit:** `231796cc48868f4ea276f652139b6bebbad0cd02` 
+
 # The Mini-Rubik and Its C99 Solver
 
 This report describes the 2×2×2 Rubik’s Cube as a finite state graph and explains the design, algorithmic complexity, and formal validation of the C99 solver in `solver.c`.
