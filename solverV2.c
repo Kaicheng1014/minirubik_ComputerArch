@@ -1,88 +1,123 @@
 #include <stdio.h>
 #include <stdint.h>
-// 載入我們在 PC 端算好並輸出的 109.5 KiB 大表
+#include <string.h>
 #include "pdb.h"
 
-// 9 種基本轉法名稱，對應編號 0~8
 const char* MOVE_NAMES[] = {"R", "R2", "R'", "B", "B2", "B'", "D", "D2", "D'"};
+const int FACTORIAL[] = {1, 1, 2, 6, 24, 120, 720, 5040};
 
 // ==========================================
-// 1. 非遞迴 IDA* 的靜態堆疊結構 (Static Stack)
+// 1. 初始化轉換工具 (將字串轉換為查表用的整數編號)
 // ==========================================
-// 用來取代 function call stack，手動紀錄每次深搜的狀態
+uint16_t perm_to_index(const uint8_t *perm) {
+    int index = 0;
+    for (int i = 0; i < 7; i++) {
+        int count = 0;
+        for (int j = i + 1; j < 7; j++) {
+            if (perm[j] < perm[i]) count++;
+        }
+        index += count * FACTORIAL[6 - i];
+    }
+    return index;
+}
+
+uint16_t ori_to_index(const uint8_t *ori) {
+    int index = 0;
+    for (int i = 0; i < 6; i++) {
+        index = index * 3 + ori[i];
+    }
+    return index;
+}
+
+// 解析命令列的字串狀態，並防呆檢查
+int parse_state(const char *input, uint16_t *start_p, uint16_t *start_o) {
+    if (strlen(input) != 14) return 0;
+    
+    uint8_t perm[7], ori[7];
+    int ori_sum = 0;
+    
+    // 解析字元 ('1'~'7' 及 '1'~'3')
+    for (int i = 0; i < 14; ++i) {
+        int limit = (i < 7) ? 7 : 3;
+        if (input[i] < '1' || input[i] > '0' + limit) return 0;
+        
+        if (i < 7) {
+            perm[i] = input[i] - '1';
+            // 檢查重複的排列
+            for (int j = 0; j < i; j++) {
+                if (perm[i] == perm[j]) return 0;
+            }
+        } else {
+            ori[i - 7] = input[i] - '1';
+            ori_sum += ori[i - 7];
+        }
+    }
+    
+    // 魔術方塊物理定律：方向總和必須是 3 的倍數
+    if (ori_sum % 3 != 0) return 0;
+    
+    *start_p = perm_to_index(perm);
+    *start_o = ori_to_index(ori);
+    return 1;
+}
+
+// ==========================================
+// 2. IDA* 靜態堆疊與 Bounded DFS
+// ==========================================
 typedef struct {
-    uint16_t perm;      // 當前的位置編號 (0~5039)
-    uint16_t ori;       // 當前的方向編號 (0~728)
-    uint8_t g;          // 已經走過的步數 (Depth / g-value)
-    int8_t last_face;   // 上一步轉動的面 (0:R, 1:B, 2:D, -1:起始無)，用於同面剪枝
-    int8_t next_move;   // 狀態機：記住這個節點下一個要嘗試的轉法 (0~8)
+    uint16_t perm;
+    uint16_t ori;
+    uint8_t g;
+    int8_t last_face;
+    int8_t next_move;
 } StackFrame;
 
-// 魔術方塊 (限定3面) 最大直徑為 11，宣告 12 絕對安全且極度省記憶體
 StackFrame stack[12];
-uint8_t solution[12]; // 用來記錄最終找到的解法路徑
+uint8_t solution[12];
 
-// ==========================================
-// 2. 核心搜尋：非遞迴 Bounded DFS
-// ==========================================
-// 執行一次限定 bound 的深度優先搜尋
-// 找到解回傳總步數；沒找到則回傳 -1，並透過 next_bound 回傳下一個最小的 f 值
 int bounded_dfs(uint16_t start_perm, uint16_t start_ori, int bound, int *next_bound) {
-    int sp = 0; // Stack Pointer (堆疊指標)
-    
-    // 初始化根節點 (Root)
+    int sp = 0;
     stack[sp].perm = start_perm;
     stack[sp].ori = start_ori;
     stack[sp].g = 0;
     stack[sp].last_face = -1;
     stack[sp].next_move = 0;
     
-    int min_out_of_bound = 100; // 記錄超過 bound 的最小 f 值 (充當無限大)
+    int min_out_of_bound = 100;
     
     while (sp >= 0) {
-        // 如果當前節點的 9 種轉法都試過了，進行 Backtrack (退回上一層)
         if (stack[sp].next_move >= 9) {
             sp--; 
             continue;
         }
         
-        int m = stack[sp].next_move++; // 取得要嘗試的轉法，並推進狀態機
+        int m = stack[sp].next_move++;
         int face = m / 3;
         
-        // 剪枝 1：同面連續轉動剪枝 (例如 R 接著 R2，完全多餘)
-        if (face == stack[sp].last_face) {
-            continue;
-        }
+        if (face == stack[sp].last_face) continue;
         
-        // O(1) 狀態轉移：直接查表得到新狀態編號！完全避開複雜數學運算
+        // O(1) 查表狀態轉移
         uint16_t next_p = perm_trans[stack[sp].perm][m];
         uint16_t next_o = ori_trans[stack[sp].ori][m];
         uint8_t g = stack[sp].g + 1;
         
-        // 檢查是否抵達解答 (目標狀態的排列與方向編號皆為 0)
         if (next_p == 0 && next_o == 0) {
             solution[g - 1] = m;
             return g; 
         }
         
-        // 取得啟發值 h = max(PDB_perm, PDB_ori)
         uint8_t h_p = perm_pdb[next_p];
         uint8_t h_o = ori_pdb[next_o];
         uint8_t h = (h_p > h_o) ? h_p : h_o;
-        
         int f = g + h;
         
-        // 剪枝 2：IDA* 邊界檢查
         if (f > bound) {
-            if (f < min_out_of_bound) {
-                min_out_of_bound = f;
-            }
+            if (f < min_out_of_bound) min_out_of_bound = f;
             continue;
         }
         
-        // 若 f <= bound，將下一個狀態 Push 進 Stack 繼續深搜
-        solution[g - 1] = m; // 暫存可能路徑
-        if (sp < 11) {       // 安全防護，避免超出直徑
+        solution[g - 1] = m;
+        if (sp < 11) {
             sp++;
             stack[sp].perm = next_p;
             stack[sp].ori = next_o;
@@ -93,12 +128,56 @@ int bounded_dfs(uint16_t start_perm, uint16_t start_ori, int bound, int *next_bo
     }
     
     *next_bound = min_out_of_bound;
-    return -1; // 此次 bound 沒找到解
+    return -1;
 }
 
+// ==========================================
+// 3. 系統入口與輸出
+// ==========================================
+int main(int argc, char **argv) {
+    uint16_t start_p = 0, start_o = 0;
+    
+    // 解析命令列參數傳入的初始狀態
+    if (argc != 2 || !parse_state(argv[1], &start_p, &start_o)) {
+        fprintf(stderr, "usage: %s PPPPPPPOOOOOOO\n", argc > 0 && argv[0] ? argv[0] : "solver");
+        return 2;
+    }
 
+    // 若已經是復原狀態，直接印出換行
+    if (start_p == 0 && start_o == 0) {
+        putchar('\n');
+        return 0;
+    }
 
-int main() {
-    printf("Solver skeleton compiled. Ready for IDA*.\n");
+    uint8_t h_p = perm_pdb[start_p];
+    uint8_t h_o = ori_pdb[start_o];
+    int bound = (h_p > h_o) ? h_p : h_o;
+    int ans_length = -1;
+
+    // IDA* 迭代
+    while (1) {
+        int next_bound;
+        ans_length = bounded_dfs(start_p, start_o, bound, &next_bound);
+        
+        if (ans_length != -1) break;
+        
+        if (next_bound > 11) {
+            fprintf(stderr, "No solution found.\n");
+            return 1;
+        }
+        bound = next_bound;
+    }
+
+    // 完全依照原格式輸出解法，以空白分隔
+    const char *separator = "";
+    for (int i = 0; i < ans_length; i++) {
+        printf("%s%s", separator, MOVE_NAMES[solution[i]]);
+        separator = " ";
+    }
+    putchar('\n');
+    
+    // 確保輸出不會卡在緩衝區
+    if (fflush(stdout) != 0 || ferror(stdout)) return 1;
+
     return 0;
 }
