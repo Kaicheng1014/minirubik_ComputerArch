@@ -81,36 +81,35 @@ void index_to_ori(int index, uint8_t *ori) {
 // 角塊索引定義 (固定 UFL)：0:UBL, 1:UBR, 2:UFR, 3:DFL, 4:DFR, 5:DBR, 6:DBL
 // 轉動時，牽涉的 4 個角塊位置會順序輪替，部分面的轉動會改變方向(Twist)
 
-const uint8_t BASE_PERM[3][4] = {
-    {1, 5, 4, 2}, // R 面順時針牽涉的角塊
-    {0, 1, 5, 6}, // B 面順時針牽涉的角塊
-    {3, 4, 5, 6}  // D 面順時針牽涉的角塊
+// ==========================================
+// 3. 魔術方塊轉動邏輯 (Move Generators)
+// ==========================================
+static const uint8_t source[3][7] = {
+    {1, 4, 2, 0, 3, 5, 6}, // 轉動面 0 (R) 的變化
+    {0, 1, 2, 4, 5, 6, 3}, // 轉動面 1 (B) 的變化
+    {0, 2, 5, 3, 1, 4, 6}, // 轉動面 2 (D) 的變化
 };
 
-// 方向變化 (0: 不變, 1: 順時針轉, 2: 逆時針轉)
-const uint8_t BASE_TWIST[3][4] = {
-    {1, 2, 1, 2}, // R 面轉動的 Twist
-    {1, 2, 1, 2}, // B 面轉動的 Twist
-    {0, 0, 0, 0}  // D 面轉動的 Twist (底層轉動不改變 U/D 朝向)
+static const uint8_t twist[3][7] = {
+    {1, 2, 0, 2, 1, 0, 0}, // 面 0 的扭轉增量
+    {0, 0, 0, 1, 2, 1, 2}, // 面 1 的扭轉增量
+    {0, 0, 0, 0, 0, 0, 0}, // 面 2 的扭轉增量
 };
 
 // 執行一次基本轉動
 void apply_move(uint8_t *perm, uint8_t *ori, int move_id) {
-    int face = move_id / 3;       // 0: R, 1: B, 2: D
-    int turns = (move_id % 3) + 1; // 1: 順時針 90度, 2: 180度, 3: 逆時針 90度
+    int face = move_id / 3;       
+    int turns = (move_id % 3) + 1; 
     
     for (int t = 0; t < turns; t++) {
         uint8_t old_perm[7], old_ori[7];
         memcpy(old_perm, perm, 7);
         memcpy(old_ori, ori, 7);
         
-        // 執行 4-cycle 的置換與方向更新
-        for (int i = 0; i < 4; i++) {
-            int curr = BASE_PERM[face][i];
-            int next = BASE_PERM[face][(i + 1) % 4];
-            perm[next] = old_perm[curr];
-            // 更新方向：舊方向加上轉動造成的變化，並取 3 的餘數
-            ori[next] = (old_ori[curr] + BASE_TWIST[face][i]) % 3;
+        for (int i = 0; i < 7; i++) {
+            int from = source[face][i];
+            perm[i] = old_perm[from];
+            ori[i] = (old_ori[from] + twist[face][i]) % 3;
         }
     }
 }
