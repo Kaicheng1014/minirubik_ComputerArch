@@ -120,8 +120,82 @@ void apply_move(uint8_t *perm, uint8_t *ori, int move_id) {
 // ==========================================
 int main() {
     printf("=== 2x2 Rubik's Cube PDB Generator (Option 2) ===\n");
-    printf("Target: Generating Transition Tables & Independent PDBs\n");
 
+    // 配置記憶體存放建表結果
+    uint16_t (*perm_trans)[NUM_MOVES] = malloc(PERM_STATES * NUM_MOVES * sizeof(uint16_t));
+    uint16_t (*ori_trans)[NUM_MOVES] = malloc(ORI_STATES * NUM_MOVES * sizeof(uint16_t));
+    uint8_t *perm_pdb = malloc(PERM_STATES);
+    uint8_t *ori_pdb = malloc(ORI_STATES);
+
+    // 距離表初始設為 255 (未造訪)
+    memset(perm_pdb, 255, PERM_STATES);
+    memset(ori_pdb, 255, ORI_STATES);
+
+    printf("Generating Transition Tables...\n");
+    // 建立 Permutation 轉動表
+    for (int i = 0; i < PERM_STATES; i++) {
+        for (int m = 0; m < NUM_MOVES; m++) {
+            uint8_t perm[7], ori[7] = {0};
+            index_to_perm(i, perm);
+            apply_move(perm, ori, m);
+            perm_trans[i][m] = perm_to_index(perm);
+        }
+    }
+    
+    // 建立 Orientation 轉動表
+    for (int i = 0; i < ORI_STATES; i++) {
+        for (int m = 0; m < NUM_MOVES; m++) {
+            uint8_t perm[7] = {0,1,2,3,4,5,6}, ori[7];
+            index_to_ori(i, ori);
+            apply_move(perm, ori, m);
+            ori_trans[i][m] = ori_to_index(ori);
+        }
+    }
+
+    printf("Generating Distance Tables (BFS)...\n");
+    int *q = malloc(PERM_STATES * sizeof(int));
+    int head = 0, tail = 0;
+
+    // Permutation BFS (編號 0 為解答狀態)
+    q[tail++] = 0;
+    perm_pdb[0] = 0;
+    int visited_perm = 1;
+
+    while (head < tail) {
+        int curr = q[head++];
+        uint8_t dist = perm_pdb[curr];
+        for (int m = 0; m < NUM_MOVES; m++) {
+            int next = perm_trans[curr][m];
+            if (perm_pdb[next] == 255) {
+                perm_pdb[next] = dist + 1;
+                q[tail++] = next;
+                visited_perm++;
+            }
+        }
+    }
+    printf("Permutation BFS visited: %d states\n", visited_perm);
+
+    // Orientation BFS
+    head = 0; tail = 0;
+    q[tail++] = 0;
+    ori_pdb[0] = 0;
+    int visited_ori = 1;
+
+    while (head < tail) {
+        int curr = q[head++];
+        uint8_t dist = ori_pdb[curr];
+        for (int m = 0; m < NUM_MOVES; m++) {
+            int next = ori_trans[curr][m];
+            if (ori_pdb[next] == 255) {
+                ori_pdb[next] = dist + 1;
+                q[tail++] = next;
+                visited_ori++;
+            }
+        }
+    }
+    printf("Orientation BFS visited: %d states\n", visited_ori);
+
+    printf("Writing to pdb.h...\n");
     FILE *f = fopen("pdb.h", "w");
     if (!f) {
         perror("Error: Failed to create pdb.h");
@@ -131,11 +205,50 @@ int main() {
     fprintf(f, "#ifndef PDB_H\n#define PDB_H\n\n");
     fprintf(f, "#include <stdint.h>\n\n");
 
-    fprintf(f, "// Transition Tables and PDB arrays will be generated here.\n");
+    // 輸出 perm_trans
+    fprintf(f, "const uint16_t perm_trans[%d][%d] = {\n", PERM_STATES, NUM_MOVES);
+    for (int i = 0; i < PERM_STATES; i++) {
+        fprintf(f, "    {");
+        for (int m = 0; m < NUM_MOVES; m++) {
+            fprintf(f, "%d%s", perm_trans[i][m], m == NUM_MOVES - 1 ? "" : ", ");
+        }
+        fprintf(f, "}%s\n", i == PERM_STATES - 1 ? "" : ",");
+    }
+    fprintf(f, "};\n\n");
 
-    fprintf(f, "\n#endif // PDB_H\n");
+    // 輸出 ori_trans
+    fprintf(f, "const uint16_t ori_trans[%d][%d] = {\n", ORI_STATES, NUM_MOVES);
+    for (int i = 0; i < ORI_STATES; i++) {
+        fprintf(f, "    {");
+        for (int m = 0; m < NUM_MOVES; m++) {
+            fprintf(f, "%d%s", ori_trans[i][m], m == NUM_MOVES - 1 ? "" : ", ");
+        }
+        fprintf(f, "}%s\n", i == ORI_STATES - 1 ? "" : ",");
+    }
+    fprintf(f, "};\n\n");
+
+    // 輸出 perm_pdb
+    fprintf(f, "const uint8_t perm_pdb[%d] = {\n    ", PERM_STATES);
+    for (int i = 0; i < PERM_STATES; i++) {
+        fprintf(f, "%d%s", perm_pdb[i], i == PERM_STATES - 1 ? "" : ", ");
+        if ((i + 1) % 16 == 0) fprintf(f, "\n    ");
+    }
+    fprintf(f, "\n};\n\n");
+
+    // 輸出 ori_pdb
+    fprintf(f, "const uint8_t ori_pdb[%d] = {\n    ", ORI_STATES);
+    for (int i = 0; i < ORI_STATES; i++) {
+        fprintf(f, "%d%s", ori_pdb[i], i == ORI_STATES - 1 ? "" : ", ");
+        if ((i + 1) % 16 == 0) fprintf(f, "\n    ");
+    }
+    fprintf(f, "\n};\n\n");
+
+    fprintf(f, "#endif // PDB_H\n");
     fclose(f);
 
-    printf("Skeleton initialized successfully. pdb.h framework created.\n");
+    free(perm_trans); free(ori_trans);
+    free(perm_pdb); free(ori_pdb); free(q);
+
+    printf("Done! pdb.h generated successfully.\n");
     return 0;
 }
