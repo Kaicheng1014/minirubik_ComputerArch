@@ -8,7 +8,8 @@ HOST_CFLAGS = -O3 -Wall
 # Target 端 (RISC-V)
 RV_CC = riscv64-unknown-elf-gcc
 RV_ARCH = -march=rv32i -mabi=ilp32
-RV_CFLAGS = $(RV_ARCH) -O3 -static
+# 補上 -specs=picolibc.specs 讓編譯器找得到 stdio.h
+RV_CFLAGS = $(RV_ARCH) -O3 -static -specs=picolibc.specs --oslib=semihost
 EMU = qemu-riscv32
 GDB = gdb-multiarch
 
@@ -74,7 +75,7 @@ rv-run: solver.elf
 # ==========================================
 asm: $(SOLVER_SRC) pdb.h
 	@echo "\n[RV32I] Generating assembly code (solver_compiler.s)..."
-	$(RV_CC) $(RV_ARCH) -O3 -S $(SOLVER_SRC) -o solver_compiler.s
+	$(RV_CC) $(RV_CFLAGS) -S $(SOLVER_SRC) -o solver_compiler.s
 
 debug-server: solver.elf
 	@echo "\n啟動 QEMU GDB Server (等待連線中)..."
