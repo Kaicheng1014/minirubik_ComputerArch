@@ -152,6 +152,11 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+
+    
+    printf("start_p: %u, start_o: %u\n", start_p, start_o);
+    }
+
     if (start_p == 0 && start_o == 0) {
         putchar('\n');
         return 0;

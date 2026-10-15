@@ -6,18 +6,319 @@
     # ==========================================
     # 資料區段 (.data)：放置大表與全域陣列
     # ==========================================
-    .data
+	.data
     .align 2
 
-    # --- 自訂軟體堆疊 (用於取代 ABI 的遞迴 Stack) ---
-    # 假設需要記錄最多 12 層的狀態，每層需要存 perm(2 bytes) + ori(2 bytes) + path(1 byte)
-    # 這裡直接開好全域記憶體空間，避開複雜的動態分配
-stack_perm: .space 24       # 12 * 2 bytes
-stack_ori:  .space 24       # 12 * 2 bytes
-path:       .space 12       # 12 * 1 bytes
+    # ==========================================================
+    # 1. IDA* 靜態堆疊與狀態陣列 (對應 StackFrame stack[12])
+    # ==========================================================
+stack_perm:      .space 24  # 12 * 2 bytes (uint16_t)
+stack_ori:       .space 24  # 12 * 2 bytes (uint16_t)
+stack_g:         .space 12  # 12 * 1 bytes (uint8_t)
+stack_last_face: .space 12  # 12 * 1 bytes (int8_t)
+stack_next_move: .space 12  # 12 * 1 bytes (int8_t)
+solution:        .space 12  # 12 * 1 bytes (uint8_t)
 
-    # --- 從 solver_O2_reference.s 複製出來的大表 ---
-    .align 1                # .half 需要 2-byte 對齊
+    # ==========================================================
+    # 2. RV32I 優化 1：查表取代除法 (face = m / 3)
+    # ==========================================================
+    .align 0
+move_to_face:
+    .byte 0, 0, 0, 1, 1, 1, 2, 2, 2
+
+    .text
+    .align 2
+    .globl bounded_dfs
+
+
+.text
+    .align 2
+    .globl _start
+
+# ==========================================================
+# 程式進入點：main (外層 IDA* 迴圈)
+# ==========================================================
+_start:
+    # --- 1. 設定初始打亂狀態 (測試用：這裡設定一個需要幾步還原的狀態) ---
+    # 假設我們從某個狀態開始，你需要將 C 算出來的 start_p 和 start_o 填入
+    # 這裡先用 0 測試，代表已經解開的狀態。你可以改成你 C 程式印出來的數字。
+    li   s0, 720              # s0 = start_p
+    li   s1, 0              # s1 = start_o
+
+    # --- 2. 計算初始 bound = max(h_p, h_o) ---
+    la   t0, perm_pdb
+    add  t1, t0, s0
+    lbu  t2, 0(t1)          # t2 = h_p
+
+    la   t0, ori_pdb
+    add  t1, t0, s1
+    lbu  t3, 0(t1)          # t3 = h_o
+
+    # Branchless max (與稍早的邏輯相同)
+    sub  t0, t3, t2         # diff = h_o - h_p
+    srai t1, t0, 31         # mask
+    and  t4, t0, t1         # diff & mask
+    sub  s2, t3, t4         # s2 = bound
+
+    # 開闢 4 bytes 空間給 next_bound 指標
+    addi sp, sp, -4
+
+ida_loop:
+    # --- 3. 呼叫 bounded_dfs ---
+    mv   a0, s0             # a0 = start_p
+    mv   a1, s1             # a1 = start_o
+    mv   a2, s2             # a2 = bound
+    mv   a3, sp             # a3 = &next_bound (傳入 stack 位址)
+    call bounded_dfs
+
+    # --- 4. 檢查回傳結果 ---
+    li   t0, -1
+    bne  a0, t0, ida_success # 如果回傳值不是 -1，代表找到了！跳出迴圈
+
+    # --- 5. 更新 bound = next_bound 並繼續 ---
+    lw   t1, 0(sp)          # 讀取 next_bound
+    li   t2, 11
+    bgt  t1, t2, ida_fail   # 如果 next_bound > 11，無解，結束程式
+    
+    mv   s2, t1             # bound = next_bound
+    j    ida_loop
+
+ida_success:
+    # a0 裡面現在裝著還原所需的步數 (ans_length)
+    # solution 陣列裡面裝著具體的轉法 (0~8 對應 R, R2... 等)
+    mv   s11, a0            # 將步數存入 s11 觀察
+    j    program_exit
+
+ida_fail:
+    # 找不到解
+    li   s11, -1
+
+program_exit:
+    # 歸還 next_bound 空間並結束程式 (Syscall 93)
+    addi sp, sp, 4
+    li   a7, 93
+    mv   a0, s11   
+    ecall
+
+# ==========================================================
+# 核心演算法：bounded_dfs (迭代版 Iterative, 無遞迴)
+# C 原型：int bounded_dfs(uint16_t start_p, uint16_t start_o, int bound, int *next_bound)
+# 傳入參數：
+#   a0 = start_perm
+#   a1 = start_ori
+#   a2 = bound
+#   a3 = next_bound 的記憶體位址
+# ==========================================================
+bounded_dfs:
+    # --- Prologue ---
+    addi sp, sp, -48
+    sw   s0, 44(sp)
+    sw   s1, 40(sp)
+    sw   s2, 36(sp)
+    sw   s3, 32(sp)
+    sw   s4, 28(sp)
+    sw   s5, 24(sp)
+    sw   s6, 20(sp)
+    sw   s10, 16(sp)
+    sw   s11, 12(sp)
+
+    # --- 載入常數與傳入參數 ---
+    li   s10, 100           # s10 = min_out_of_bound = 100
+    mv   s4, a2             # s4  = bound
+    mv   s5, a3             # s5  = next_bound pointer
+    li   s6, 0              # s6  = sp = 0 (軟體堆疊指標)
+
+    # --- 預先載入陣列基址 (一勞永逸) ---
+    la   s0, perm_trans
+    la   s1, ori_trans
+    la   s2, perm_pdb
+    la   s3, ori_pdb
+    la   s11, move_to_face
+
+    # --- 初始化 stack[0] ---
+    la   t0, stack_perm
+    sh   a0, 0(t0)          # stack[0].perm = start_perm
+    la   t0, stack_ori
+    sh   a1, 0(t0)          # stack[0].ori = start_ori
+    la   t0, stack_g
+    sb   zero, 0(t0)        # stack[0].g = 0
+    la   t0, stack_last_face
+    li   t1, -1
+    sb   t1, 0(t0)          # stack[0].last_face = -1
+    la   t0, stack_next_move
+    sb   zero, 0(t0)        # stack[0].next_move = 0
+
+# ==========================================================
+# 迴圈起點：while (sp >= 0)
+# ==========================================================
+dfs_while:
+    bltz s6, dfs_fail       # 若 sp < 0，代表這條路徑窮舉完，跳出迴圈
+
+    # 讀取 stack[sp].next_move
+    la   t0, stack_next_move
+    add  t1, t0, s6         # offset = sp * 1
+    lbu  t2, 0(t1)          # t2 = stack[sp].next_move
+
+    # if (stack[sp].next_move >= 9) { sp--; continue; }
+    li   t3, 9
+    blt  t2, t3, do_move
+    addi s6, s6, -1         # sp--
+    j    dfs_while
+
+do_move:
+    # m = stack[sp].next_move++
+    mv   a4, t2             # a4 = m
+    addi t2, t2, 1
+    sb   t2, 0(t1)          # 將 ++ 後的值存回 stack[sp].next_move
+
+    # 查表：face = MOVE_TO_FACE[m]
+    add  t0, s11, a4
+    lb   t3, 0(t0)          # t3 = face
+
+    # 剪枝 (Pruning)：if (face == stack[sp].last_face) continue;
+    la   t0, stack_last_face
+    add  t1, t0, s6
+    lb   t4, 0(t1)          # t4 = stack[sp].last_face
+    beq  t3, t4, dfs_while
+
+    # 讀取當前狀態 stack[sp].perm 與 stack[sp].ori
+    slli t5, s6, 1          # t5 = sp * 2 (16-bit array offset)
+    la   t0, stack_perm
+    add  t1, t0, t5
+    lhu  t6, 0(t1)          # t6 = curr_perm
+
+    la   t0, stack_ori
+    add  t1, t0, t5
+    lhu  a5, 0(t1)          # a5 = curr_ori
+
+    # --- RV32I 優化 2：Shift-Add 取代乘法 ---
+    # p_idx = (curr_perm << 3) + curr_perm + m (即 curr_perm * 9 + m)
+    slli t0, t6, 3
+    add  t0, t0, t6
+    add  t0, t0, a4
+    slli t0, t0, 1          # * 2 (因為陣列型別是 uint16_t)
+    add  t1, s0, t0
+    lhu  t6, 0(t1)          # t6 更新為 next_p
+
+    # o_idx = (curr_ori << 3) + curr_ori + m
+    slli t0, a5, 3
+    add  t0, t0, a5
+    add  t0, t0, a4
+    slli t0, t0, 1
+    add  t1, s1, t0
+    lhu  a5, 0(t1)          # a5 更新為 next_o
+
+    # 計算深度 g = stack[sp].g + 1
+    la   t0, stack_g
+    add  t1, t0, s6
+    lbu  t4, 0(t1)
+    addi t4, t4, 1          # t4 = g
+
+    # 檢查是否到達終點：if (next_p == 0 && next_o == 0)
+    bnez t6, calc_heuristic
+    bnez a5, calc_heuristic
+    
+    # 到達終點，寫入 solution 並回傳
+    la   t0, solution
+    addi t1, t4, -1         # offset = g - 1
+    add  t2, t0, t1
+    sb   a4, 0(t2)          # solution[g - 1] = m
+    mv   a0, t4             # 回傳值 a0 = g
+    j    dfs_epilogue
+
+calc_heuristic:
+    # 查表取得 Heuristic
+    # h_p = perm_pdb[next_p]
+    add  t0, s2, t6
+    lbu  a6, 0(t0)          # a6 = h_p
+
+    # h_o = ori_pdb[next_o]
+    add  t0, s3, a5
+    lbu  a7, 0(t0)          # a7 = h_o
+
+    # --- RV32I 優化 3：Branchless Max 計算 h ---
+    # int diff = h_o - h_p;
+    # int mask = diff >> 31;
+    # uint8_t h = h_o - (diff & mask);
+    sub  t0, a7, a6         # t0 = diff
+    srai t1, t0, 31         # t1 = mask
+    and  t2, t0, t1         # t2 = diff & mask
+    sub  t3, a7, t2         # t3 = h
+
+    # 總估價 f = g + h
+    add  t3, t3, t4         # t3 = f
+
+    # 判斷是否超出邊界：if (f > bound)
+    ble  t3, s4, push_stack
+    bge  t3, s10, dfs_while # if (f >= min_out_of_bound) continue
+    mv   s10, t3            # 更新 min_out_of_bound = f
+    j    dfs_while
+
+push_stack:
+    # 記錄目前走法 solution[g - 1] = m
+    la   t0, solution
+    addi t1, t4, -1
+    add  t2, t0, t1
+    sb   a4, 0(t2)
+
+    # 避免堆疊溢位：if (sp < 11)
+    li   t0, 11
+    bge  s6, t0, dfs_while
+    
+    # 展開下一層：sp++
+    addi s6, s6, 1
+
+    # stack[sp].perm = next_p
+    slli t5, s6, 1          # 更新 16-bit array offset
+    la   t0, stack_perm
+    add  t1, t0, t5
+    sh   t6, 0(t1)
+
+    # stack[sp].ori = next_o
+    la   t0, stack_ori
+    add  t1, t0, t5
+    sh   a5, 0(t1)
+
+    # stack[sp].g = g
+    la   t0, stack_g
+    add  t1, t0, s6
+    sb   t4, 0(t1)
+
+    # stack[sp].last_face = face
+    la   t0, stack_last_face
+    add  t1, t0, s6
+    sb   t3, 0(t1)
+
+    # stack[sp].next_move = 0
+    la   t0, stack_next_move
+    add  t1, t0, s6
+    sb   zero, 0(t1)
+
+    j    dfs_while
+
+dfs_fail:
+    # 找不到解，儲存 next_bound 並回傳 -1
+    # *next_bound = min_out_of_bound
+    sw   s10, 0(s5)
+    li   a0, -1             # 回傳值 a0 = -1
+
+dfs_epilogue:
+    # --- Epilogue ---
+    lw   s11, 12(sp)
+    lw   s10, 16(sp)
+    lw   s6, 20(sp)
+    lw   s5, 24(sp)
+    lw   s4, 28(sp)
+    lw   s3, 32(sp)
+    lw   s2, 36(sp)
+    lw   s1, 40(sp)
+    lw   s0, 44(sp)
+    addi sp, sp, 48
+    ret
+
+    # ==========================================================
+    # 以下保留 perm_trans, ori_trans, perm_pdb, ori_pdb 大表
+    # ==========================================================
 perm_trans:
 	.half	1104
 	.half	3294
@@ -52346,72 +52647,3 @@ ori_pdb:
     .globl main
     .globl bounded_dfs
 
-# ----------------------------------------------------------
-# 程式進入點：main (負責設定測資與呼叫 bounded_dfs)
-# ----------------------------------------------------------
-main:
-    # (暫時留空，等 bounded_dfs 寫完再來寫測試案例的呼叫)
-    
-    # 結束程式 (System call exit)
-    li a7, 93
-    li a0, 0
-    ecall
-
-# ----------------------------------------------------------
-# 核心演算法：bounded_dfs
-# 參數：a0 = bound, a1 = next_bound, a2 = sp (軟體指標)
-# ----------------------------------------------------------
-bounded_dfs:
-    # 1. Prologue: 保護常駐暫存器
-    addi sp, sp, -52
-    sw   ra, 48(sp)
-    sw   s0, 44(sp)
-    sw   s1, 40(sp)
-    sw   s2, 36(sp)
-    sw   s3, 32(sp)
-    sw   s4, 28(sp)
-    sw   s5, 24(sp)
-    sw   s6, 20(sp)
-    sw   s7, 16(sp)
-    sw   s8, 12(sp)
-    sw   s9, 8(sp)
-    sw   s10, 4(sp)
-    sw   s11, 0(sp)
-
-    # 2. 初始化核心狀態暫存器
-    mv   s4, a0             # s4 = bound
-    mv   s5, a1             # s5 = next_bound
-    mv   s6, a2             # s6 = 目前深度 (sp)
-
-    # 3. 載入表與陣列的基址 (一勞永逸)
-    la   s0, perm_trans     # s0 = perm_trans 基址
-    la   s1, ori_trans      # s1 = ori_trans 基址
-    la   s2, perm_pdb       # s2 = perm_pdb 基址
-    la   s3, ori_pdb        # s3 = ori_pdb 基址
-    la   s7, stack_perm     # s7 = stack_perm 陣列基址
-    la   s8, stack_ori      # s8 = stack_ori 陣列基址
-    la   s9, path           # s9 = path 陣列基址
-
-    # ======================================================
-    # [這裡放入 IDA* 的核心邏輯]
-    # ======================================================
-    
-    # 暫時回傳 next_bound
-    mv   a0, s5
-
-    # 4. Epilogue: 恢復暫存器並返回
-    lw   s11, 0(sp)
-    lw   s10, 4(sp)
-    lw   s9, 8(sp)
-    lw   s8, 12(sp)
-    lw   s7, 16(sp)
-    lw   s6, 20(sp)
-    lw   s5, 24(sp)
-    lw   s4, 28(sp)
-    lw   s3, 32(sp)
-    lw   s2, 36(sp)
-    lw   s1, 40(sp)
-    lw   s0, 44(sp)
-    lw   ra, 48(sp)
-    addi sp, sp, 52
-    ret

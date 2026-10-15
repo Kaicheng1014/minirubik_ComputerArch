@@ -14,7 +14,7 @@ EMU = qemu-riscv32
 GDB = gdb-multiarch
 
 # 來源檔案設定 (日後若要改成 solver.s，只需改這一行即可)
-SOLVER_SRC = solverV2.c
+SOLVER_SRC = solver.c
 
 # 預設執行的指令 (當你只打 make 時)
 .PHONY: help table test host-run rv-build rv-run asm debug-server debug-client clean
