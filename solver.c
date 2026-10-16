@@ -1,7 +1,8 @@
-#include <stdio.h>
+//#include <stdio.h>
 #include <stdint.h>
-#include <string.h>
+//#include <string.h>
 #include "pdb.h"
+
 
 const char* MOVE_NAMES[] = {"R", "R2", "R'", "B", "B2", "B'", "D", "D2", "D'"};
 const int FACTORIAL[] = {1, 1, 2, 6, 24, 120, 720, 5040};
@@ -30,7 +31,7 @@ uint16_t ori_to_index(const uint8_t *ori) {
     return index;
 }
 
-int parse_state(const char *input, uint16_t *start_p, uint16_t *start_o) {
+/*int parse_state(const char *input, uint16_t *start_p, uint16_t *start_o) {
     if (strlen(input) != 14) return 0;
     
     uint8_t perm[7], ori[7];
@@ -56,7 +57,7 @@ int parse_state(const char *input, uint16_t *start_p, uint16_t *start_o) {
     *start_p = perm_to_index(perm);
     *start_o = ori_to_index(ori);
     return 1;
-}
+}*/
 
 // ==========================================
 // 2. IDA* 靜態堆疊與 RV32I 優化 Bounded DFS
@@ -144,7 +145,7 @@ int bounded_dfs(uint16_t start_perm, uint16_t start_ori, int bound, int *next_bo
     return -1;
 }
 
-int main(int argc, char **argv) {
+/*int main(int argc, char **argv) {
     uint16_t start_p = 0, start_o = 0;
     
     if (argc != 2 || !parse_state(argv[1], &start_p, &start_o)) {
@@ -155,7 +156,7 @@ int main(int argc, char **argv) {
 
     
     printf("start_p: %u, start_o: %u\n", start_p, start_o);
-    }
+    
 
     if (start_p == 0 && start_o == 0) {
         putchar('\n');
@@ -191,4 +192,42 @@ int main(int argc, char **argv) {
     if (fflush(stdout) != 0 || ferror(stdout)) return 1;
 
     return 0;
+}*/
+void _start() {
+    // 官方指定的極限測資起點
+    uint16_t start_p = 720, start_o = 0;
+    
+    if (start_p == 0 && start_o == 0) {
+        __asm__ volatile ("li a0, 0\n li a7, 93\n ecall");
+        while(1);
+    }
+
+    uint8_t h_p = perm_pdb[start_p];
+    uint8_t h_o = ori_pdb[start_o];
+    int diff = h_o - h_p;
+    int bound = h_o - (diff & (diff >> 31)); // Branchless max
+    int ans_length = -1;
+
+    while (1) {
+        int next_bound;
+        ans_length = bounded_dfs(start_p, start_o, bound, &next_bound);
+        
+        if (ans_length != -1) break;
+        
+        if (next_bound > 11) {
+            __asm__ volatile ("li a0, -1\n li a7, 93\n ecall");
+            while(1);
+        }
+        bound = next_bound;
+    }
+
+    // 將算出的 ans_length 放入 a0 並呼叫 Syscall 93 結束模擬器
+    __asm__ volatile (
+        "mv a0, %0\n"
+        "li a7, 93\n"
+        "ecall"
+        :
+        : "r" (ans_length)
+    );
+    while(1);
 }
